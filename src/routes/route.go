@@ -45,8 +45,16 @@ func RouteByDBRoute(r *db.DBRoute) *Route {
 		filters: r.Filters,
 	}
 
-	json.Unmarshal([]byte(r.Objects), route.Objects)
-	json.Unmarshal([]byte(r.Points), route.Points)
+	err := json.Unmarshal([]byte(r.Points), &route.Points)
+	if err != nil {
+		route.Points = []points.Point{}
+	}
+
+	// todo: load data from database
+	err = json.Unmarshal([]byte(r.Objects), &route.Objects)
+	if err != nil {
+		route.Objects = []objects.Object{}
+	}
 
 	return &route
 }
@@ -57,7 +65,22 @@ func nameByRoute(route *Route) string {
 	return fmt.Sprintf("Route %v", route.Id)
 }
 
-func ABRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
+func GetRoute(routeType string, points []points.Point, filters []string, radius int) (*Route, string) {
+	var route *Route
+
+	switch routeType {
+	case string(Direct):
+		route, _ = directRoute(points[0], points[1], filters)
+	case string(Round):
+		route, _ = roundRoute(points[0], radius, filters)
+	default:
+		return nil, "unsupported route type"
+	}
+
+	return route, ""
+}
+
+func directRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
 	route, err := getDirectRoute(a, b, filters)
 	if route != nil {
 		db.UpdateRouteCounter(route.Id)
@@ -85,7 +108,7 @@ func ABRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
 	return route, err
 }
 
-func RoundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
+func roundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
 	route, err := getRoundRoute(start, radius, filters)
 	if route != nil {
 		db.UpdateRouteCounter(route.Id)
@@ -121,12 +144,16 @@ func RoundRoute(start points.Point, radius int, filters filters.StringFilter) (*
 	return route, err
 }
 
+func roundCoordinates(coordinate float64) float64 {
+	return math.Round(coordinate*1000) / 1000
+}
+
 func saveInDB(route *Route, filters int) (int64, error) {
 	dbroute := db.DBRoute{
-		Start_lat:  route.Points[0].Lat,
-		Start_lon:  route.Points[0].Lon,
-		Finish_lat: route.Points[len(route.Points)-1].Lat,
-		Finish_lon: route.Points[len(route.Points)-1].Lon,
+		Start_lat:  roundCoordinates(route.Points[0].Lat),
+		Start_lon:  roundCoordinates(route.Points[0].Lon),
+		Finish_lat: roundCoordinates(route.Points[len(route.Points)-1].Lat),
+		Finish_lon: roundCoordinates(route.Points[len(route.Points)-1].Lon),
 		Length:     route.Length,
 		Time:       route.Time,
 		Name:       route.Name,
@@ -206,6 +233,10 @@ func RouteById(id int64) (*Route, error) {
 }
 
 func getDirectRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
+	a.Lat = roundCoordinates(a.Lat)
+	a.Lon = roundCoordinates(a.Lon)
+	b.Lat = roundCoordinates(b.Lat)
+	b.Lon = roundCoordinates(b.Lon)
 	dbroute, err := db.GetDirectDBRoute(a, b, filters.Int())
 	if err != nil {
 		return nil, err
@@ -214,6 +245,8 @@ func getDirectRoute(a, b points.Point, filters filters.StringFilter) (*Route, er
 }
 
 func getRoundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
+	start.Lat = roundCoordinates(start.Lat)
+	start.Lon = roundCoordinates(start.Lon)
 	dbroute, err := db.GetRoundDBRoute(start, radius, filters.Int())
 	if err != nil {
 		return nil, err
