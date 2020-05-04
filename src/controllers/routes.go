@@ -16,20 +16,11 @@ func getRoute(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, CreateError(0, "wrong request format"))
 	}
 
-	var route *routes.Route
-
-	switch req.Type {
-	case string(routes.Direct):
-		route, err = routes.ABRoute(req.Points[0], req.Points[1], req.Filters)
-	case string(routes.Round):
-		route, err = routes.RoundRoute(req.Points[0], req.Radius, req.Filters)
-	default:
-		return c.JSON(http.StatusBadRequest, CreateError(0, "unsupported route type"))
+	route, errString := routes.GetRoute(req.Type, req.Points, req.Filters, req.Radius)
+	if len(errString) > 0 {
+		return c.JSON(http.StatusBadRequest, CreateError(0, errString))
 	}
 
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, CreateError(0, ""))
-	}
 	return c.JSON(http.StatusOK, *route)
 }
 

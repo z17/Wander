@@ -27,7 +27,7 @@ type Route struct {
 	Length  float64          `json:"length"` //meters
 	Time    int              `json:"time"`   //seconds
 	Name    string           `json:"name"`
-	Type    string
+	Type    string           `json:"type"`
 	radius  int
 	filters int
 }
@@ -45,8 +45,16 @@ func RouteByDBRoute(r *db.DBRoute) *Route {
 		filters: r.Filters,
 	}
 
-	json.Unmarshal([]byte(r.Objects), route.Objects)
-	json.Unmarshal([]byte(r.Points), route.Points)
+	err := json.Unmarshal([]byte(r.Points), &route.Points)
+	if err != nil {
+		route.Points = []points.Point{}
+	}
+
+	// todo: load data from database
+	err = json.Unmarshal([]byte(r.Objects), &route.Objects)
+	if err != nil {
+		route.Objects = []objects.Object{}
+	}
 
 	return &route
 }
@@ -57,7 +65,22 @@ func nameByRoute(route *Route) string {
 	return fmt.Sprintf("Route %v", route.Id)
 }
 
-func ABRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
+func GetRoute(routeType string, points []points.Point, filters []string, radius int) (*Route, string) {
+	var route *Route
+
+	switch routeType {
+	case string(Direct):
+		route, _ = directRoute(points[0], points[1], filters)
+	case string(Round):
+		route, _ = roundRoute(points[0], radius, filters)
+	default:
+		return nil, "unsupported route type"
+	}
+
+	return route, ""
+}
+
+func directRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
 	route, err := getDirectRoute(a, b, filters)
 	if route != nil {
 		db.UpdateRouteCounter(route.Id)
@@ -70,7 +93,7 @@ func ABRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
 	routeMainPoints = append(routeMainPoints, objects.PointsByObjects(pathObjects)...)
 	routeMainPoints = append(routeMainPoints, b)
 
-	route, err = routeByPoints(routeMainPoints)
+	route, err = getRouteByPoints(routeMainPoints)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +108,7 @@ func ABRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
 	return route, err
 }
 
-func RoundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
+func roundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
 	route, err := getRoundRoute(start, radius, filters)
 	if route != nil {
 		db.UpdateRouteCounter(route.Id)
@@ -105,7 +128,7 @@ func RoundRoute(start points.Point, radius int, filters filters.StringFilter) (*
 	routeMainPoints := append([]points.Point{start}, objects.PointsByObjects(pathObjects)...)
 	routeMainPoints = append(routeMainPoints, start)
 
-	route, err = routeByPoints(routeMainPoints)
+	route, err = getRouteByPoints(routeMainPoints)
 	if err != nil {
 		return nil, err
 	}
@@ -121,18 +144,27 @@ func RoundRoute(start points.Point, radius int, filters filters.StringFilter) (*
 	return route, err
 }
 
+func roundCoordinates(coordinate float64) float64 {
+	return math.Round(coordinate*1000) / 1000
+}
+
 func saveInDB(route *Route, filters int) (int64, error) {
 	dbroute := db.DBRoute{
-		Start_lat:  route.Points[0].Lat,
-		Start_lon:  route.Points[0].Lon,
-		Finish_lat: route.Points[len(route.Points)-1].Lat,
-		Finish_lon: route.Points[len(route.Points)-1].Lon,
+		Start_lat:  roundCoordinates(route.Points[0].Lat),
+		Start_lon:  roundCoordinates(route.Points[0].Lon),
+		Finish_lat: roundCoordinates(route.Points[len(route.Points)-1].Lat),
+		Finish_lon: roundCoordinates(route.Points[len(route.Points)-1].Lon),
 		Length:     route.Length,
 		Time:       route.Time,
 		Name:       route.Name,
 		Filters:    filters,
 	}
-	objectsJSON, _ := json.Marshal(route.Objects)
+	var objectsIds []int64
+	for i := range route.Objects {
+		objectsIds = append(objectsIds, route.Objects[i].Id)
+	}
+
+	objectsJSON, _ := json.Marshal(objectsIds)
 	dbroute.Objects = string(objectsJSON)
 	pointsJSON, _ := json.Marshal(route.Points)
 	dbroute.Points = string(pointsJSON)
@@ -152,30 +184,44 @@ func getTimeByDistance(dist float64) int {
 	return int(math.Round(dist / speed))
 }
 
-func routeByPoints(points_ []points.Point) (*Route, error) {
-	result, err := routeByOSRMResponce(osrm.GetOSRMByPoints(points_))
-	if err != nil {
-		route := Route{
-			Points:  []points.Point{},
-			Length:  0,
-			Time:    0,
-		}
-		for i := 1; i < len(points_); i++ {
-			result, err := routeByOSRMResponce(osrm.GetOSRMByPoints([]points.Point{points_[i - 1], points_[i]}))
-			if err != nil {
-				route.Points = append(route.Points, points_[i - 1], points_[i])
-				dist := routes.GetMetersDistanceByPoints(points_[i - 1], points_[i])
-				route.Length += dist
-				route.Time += getTimeByDistance(dist)
-			} else {
-				route.Length += result.Length
-				route.Time += result.Time
-				route.Points = append(route.Points, result.Points...)
-			}
-		}
-		return &route, nil
+func getRouteByPoints(pathPoints []points.Point) (*Route, error) {
+	osrmPath, err := osrm.GetOSRMByPoints(pathPoints)
+	var route *Route
+	if err == nil {
+		route, err = routeByOSRMResponse(osrmPath)
 	}
-	return result, nil
+
+	if err != nil {
+		return getRouteByPointsParts(pathPoints)
+	}
+	return route, nil
+}
+
+func getRouteByPointsParts(pathPoints []points.Point) (*Route, error) {
+	route := Route{
+		Points: []points.Point{},
+		Length: 0,
+		Time:   0,
+	}
+	for i := 1; i < len(pathPoints); i++ {
+		// todo: make requests in parallel?
+		osrmRoutePart, err := osrm.GetOSRMByPoints([]points.Point{pathPoints[i-1], pathPoints[i]})
+		var routePart *Route
+		if err == nil {
+			routePart, err = routeByOSRMResponse(osrmRoutePart)
+		}
+		if err != nil {
+			route.Points = append(route.Points, pathPoints[i-1], pathPoints[i])
+			dist := routes.GetMetersDistanceByPoints(pathPoints[i-1], pathPoints[i])
+			route.Length += dist
+			route.Time += getTimeByDistance(dist)
+		} else {
+			route.Length += routePart.Length
+			route.Time += routePart.Time
+			route.Points = append(route.Points, routePart.Points...)
+		}
+	}
+	return &route, nil
 }
 
 func RouteById(id int64) (*Route, error) {
@@ -187,6 +233,10 @@ func RouteById(id int64) (*Route, error) {
 }
 
 func getDirectRoute(a, b points.Point, filters filters.StringFilter) (*Route, error) {
+	a.Lat = roundCoordinates(a.Lat)
+	a.Lon = roundCoordinates(a.Lon)
+	b.Lat = roundCoordinates(b.Lat)
+	b.Lon = roundCoordinates(b.Lon)
 	dbroute, err := db.GetDirectDBRoute(a, b, filters.Int())
 	if err != nil {
 		return nil, err
@@ -195,6 +245,8 @@ func getDirectRoute(a, b points.Point, filters filters.StringFilter) (*Route, er
 }
 
 func getRoundRoute(start points.Point, radius int, filters filters.StringFilter) (*Route, error) {
+	start.Lat = roundCoordinates(start.Lat)
+	start.Lon = roundCoordinates(start.Lon)
 	dbroute, err := db.GetRoundDBRoute(start, radius, filters.Int())
 	if err != nil {
 		return nil, err
@@ -202,7 +254,7 @@ func getRoundRoute(start points.Point, radius int, filters filters.StringFilter)
 	return RouteByDBRoute(dbroute), nil
 }
 
-func routeByOSRMResponce(resp osrm.Response) (*Route, error) {
+func routeByOSRMResponse(resp osrm.Response) (*Route, error) {
 	if resp.Code != "Ok" {
 		return nil, errors.New("bad OSRM")
 	}
@@ -255,7 +307,7 @@ func removePointFromRoundRoute(route *Route, objectId int64) (*Route, error) {
 	radius := route.radius
 	routeFilters := route.filters
 
-	route, err := routeByPoints(routeMainPoints)
+	route, err := getRouteByPoints(routeMainPoints)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +336,7 @@ func removePointFromDirectRoute(route *Route, objectId int64) (*Route, error) {
 
 	routeFilters := route.filters
 
-	route, err := routeByPoints(routeMainPoints)
+	route, err := getRouteByPoints(routeMainPoints)
 	if err != nil {
 		return nil, err
 	}

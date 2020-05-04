@@ -17,13 +17,20 @@ var (
 
 func InitDB() {
 	source := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
-		config.Config.Database.Username, config.Config.Database.Password,
-		config.Config.Database.Host, config.Config.Database.Port, config.Config.Database.Database)
+		config.Config.Database.Username,
+		config.Config.Database.Password,
+		config.Config.Database.Host,
+		config.Config.Database.Port,
+		config.Config.Database.Database)
 	database, err := sqlx.Open("mysql", source)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	err = db.Ping()
+	if err != nil {
+		log.Fatal(err)
+	}
 	db = database
 }
 
@@ -52,7 +59,7 @@ func GetDBObjectsInRange(a, b points.Point, filters filters.StringFilter) []DBOb
 
 	err := db.Select(&result, query)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil
 	}
 
@@ -62,7 +69,7 @@ func GetDBObjectsInRange(a, b points.Point, filters filters.StringFilter) []DBOb
 func GetRoundDBRoute(start points.Point, radius, filters int) (*DBRoute, error) {
 	var route = DBRoute{}
 	query := fmt.Sprintf(
-		"select count(*) from routes where (start_lat=%f and start_lon=%f and radius=%f and filters=%v) limit 1",
+		"select count(id) from routes where (start_lat=%f and start_lon=%f and radius=%f and filters=%v) limit 1",
 		start.Lat, start.Lon, radius, filters)
 	err := db.Get(&route, query)
 	if err != nil {
@@ -78,7 +85,7 @@ func GetRoundDBRoute(start points.Point, radius, filters int) (*DBRoute, error) 
 func GetDirectDBRoute(a, b points.Point, filters int) (*DBRoute, error) {
 	var route = DBRoute{}
 	query := fmt.Sprintf(
-		"select * from routes where (start_lat=%f and start_lon=%f and finish_lat=%f and finish_lon=%f and filters=%v) limit 1",
+		"select id, type, start_lat, start_lon, finish_lat, finish_lon, radius, length, time, objects, points, name, count, filters from routes where (start_lat=%.3f and start_lon=%.3f and finish_lat=%.3f and finish_lon=%.3f and filters=%v) limit 1",
 		a.Lat, a.Lon, b.Lat, b.Lon, filters)
 
 	err := db.Get(&route, query)
@@ -105,7 +112,7 @@ func UpdateRouteName(id int64, name string) {
 func DBRouteById(id int64) (*DBRoute, error) {
 	var route = DBRoute{}
 
-	err := db.Get(&route, "select * from routes where id=?", id)
+	err := db.Get(&route, "select id, type, start_lat, start_lon, finish_lat, finish_lon, radius, length, time, objects, points, name, count, filters from routes where id=?", id)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +122,10 @@ func DBRouteById(id int64) (*DBRoute, error) {
 
 func InsertDirectRoute(route DBRoute) (int64, error) {
 	query := fmt.Sprintf(
-		`insert into routes (type, start_lat, start_lon, finish_lat, finish_lon, length, time, objects, points, name, filters) values ("%s", %f, %f, %f, %f, %f, %v, '%s', '%s', "%s", %v)`,
+		`insert into routes 
+					(type, start_lat, start_lon, finish_lat, finish_lon, length, time, objects, points, name, filters) 
+				values 
+					('%s', %.3f, %.3f, %.3f, %.3f, %f, %v, '%s', '%s', '%s', %v)`,
 		route.Type,
 		route.Start_lat, route.Start_lon, route.Finish_lat, route.Finish_lon,
 		route.Length, route.Time,
@@ -139,7 +149,10 @@ func InsertDirectRoute(route DBRoute) (int64, error) {
 
 func InsertRoundRoute(route DBRoute) (int64, error) {
 	query := fmt.Sprintf(
-		`insert into routes (type, start_lat, start_lon, radius, length, time, objects, points, name, filters) values ("%s", %f, %f, %f, %f, %f, %v, '%s', '%s', "%s", %v)`,
+		`insert into routes 
+					(type, start_lat, start_lon, radius, length, time, objects, points, name, filters) 
+				values 
+					('%s', %f, %f, %d, %f, %d, '%s', '%s', '%s', %v)`,
 		route.Type,
 		route.Start_lat,
 		route.Start_lon,
